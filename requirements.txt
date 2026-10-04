@@ -8,3 +8,6 @@ redis==5.2.*
 pydantic-settings==2.6.*
 httpx==0.28.*
 pytest==8.3.*
+passlib[bcrypt]
+PyJWT
+email-validator
