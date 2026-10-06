@@ -1,8 +1,6 @@
 from collections.abc import AsyncIterator
-
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-
 from app.config import settings
 
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -16,3 +14,12 @@ class Base(DeclarativeBase):
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
         yield session
+
+
+def scoped(query, tenant_id):
+    """
+    Apply tenant isolation to an SQLAlchemy query.
+    This assumes that the main entity being queried has a tenant_id column.
+    """
+
+    return query.filter_by(tenant_id=tenant_id)
