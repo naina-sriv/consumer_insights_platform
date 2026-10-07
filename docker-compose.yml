@@ -33,5 +33,17 @@ services:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
 
+  worker:
+    build: .
+    command: arq app.worker.settings.WorkerSettings
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://insights:insights@db:5432/insights
+      REDIS_URL: redis://redis:6379/0
+    volumes: [.:/code]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
 volumes:
   pgdata:
