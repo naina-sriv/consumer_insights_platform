@@ -46,6 +46,7 @@ class Dataset(Base):
     source_type = Column(String, nullable=False)
     row_count = Column(Integer, nullable=False, default=0)
     status = Column(String, nullable=False, default="uploaded")
+    uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 class Record(Base):
@@ -71,20 +72,38 @@ class Chunk(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class Prompt(Base):
+    __tablename__ = "prompts"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    version = Column(Integer, nullable=False)
+    template = Column(Text, nullable=False)
+    output_schema = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_prompt_name_version"),)
+
+
 class Job(Base):
     __tablename__ = "jobs"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
     dataset_id = Column(UUID(as_uuid=True), ForeignKey("datasets.id"), nullable=False)
+    type = Column(String, nullable=False, default="analyze")
     status = Column(String, nullable=False, default="queued")
     attempts = Column(Integer, nullable=False, default=0)
     progress = Column(Integer, nullable=False, default=0)
     error = Column(Text, nullable=True)
+    prompt_id = Column(UUID(as_uuid=True), ForeignKey("prompts.id"), nullable=True)
     prompt_version = Column(Text, nullable=True)
     model = Column(String, nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    idempotency_key = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "idempotency_key", name="uq_job_tenant_idempotency_key"),)
 
 class Insight(Base):
     __tablename__ = "insights"
@@ -121,8 +140,22 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     action = Column(String, nullable=False)
     entity_type = Column(String, nullable=False)
     entity_id = Column(UUID(as_uuid=True), nullable=False)
+    detail = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class EvalRun(Base):
+    __tablename__ = "eval_runs"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    prompt_id = Column(UUID(as_uuid=True), ForeignKey("prompts.id"), nullable=True)
+    model = Column(String, nullable=False)
+    dataset_size = Column(Integer, nullable=False)
+    theme_score = Column(Float, nullable=False)
+    sentiment_f1 = Column(Float, nullable=False)
+    groundedness = Column(Float, nullable=False)
+    detail = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
