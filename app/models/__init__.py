@@ -9,4 +9,6 @@ from .domain import (
     InsightSource,
     LlmCall,
     AuditLog,
+    Prompt,
+    EvalRun,
 )
