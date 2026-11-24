@@ -1,71 +1,173 @@
 import csv
+import io
 import json
-import codecs
-from typing import List, Dict, Any, Tuple
+import logging
+from typing import Any
 from fastapi import UploadFile
 
-def parse_and_validate_file(file: UploadFile) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+logger = logging.getLogger(__name__)
+
+SUPPORTED_EXTENSIONS = (".csv", ".json", ".jsonl")
+
+
+def _clean_str(val: Any) -> str:
+    """Safely convert value to trimmed string."""
+    if val is None:
+        return ""
+    return str(val).strip()
+
+
+def parse_and_validate_file(
+    file: UploadFile,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Parses a CSV or JSON file and validates its rows.
-    Returns (valid_rows, bad_rows).
-    A valid row must have 'external_id' and 'text'.
+    Parse and validate uploaded tabular / semi-structured consumer feedback file.
+
+    Supports UTF-8 / UTF-8-BOM encoded CSV, JSON (array of objects), and JSON Lines.
+    Enforces required fields: 'external_id' and 'text'.
+    Gathers additional fields into 'metadata' dictionary.
+    Deduplicates external_id in the file to prevent downstream DB constraint failures.
+
+    Returns:
+        (valid_rows, bad_rows)
     """
-    valid_rows = []
-    bad_rows = []
-    
-    content = file.file.read()
-    text_content = content.decode("utf-8")
-    
-    lines = text_content.splitlines()
-    
-    if file.filename.endswith(".csv"):
-        reader = csv.DictReader(lines)
-        for i, row in enumerate(reader, start=1):
-            if not row.get("external_id") or not row.get("text"):
-                bad_rows.append({"line": i, "error": "Missing external_id or text", "data": row})
+    filename = (file.filename or "").lower()
+
+    if not any(filename.endswith(ext) for ext in SUPPORTED_EXTENSIONS):
+        return [], [
+            {
+                "line": 0,
+                "error": "Unsupported file format. Must be .csv, .json, or .jsonl",
+                "data": None,
+            }
+        ]
+
+    # Read binary content and decode using utf-8-sig to automatically strip BOM
+    raw_bytes = file.file.read()
+    try:
+        text_content = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        return [], [{"line": 0, "error": f"Encoding error: file must be UTF-8 encoded ({exc})", "data": None}]
+
+    valid_rows: list[dict[str, Any]] = []
+    bad_rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    if filename.endswith(".csv"):
+        # Stream parse with csv.DictReader
+        stream = io.StringIO(text_content, newline="")
+        reader = csv.DictReader(stream)
+
+        # Normalize column header names
+        if reader.fieldnames:
+            reader.fieldnames = [name.strip() if name else "" for name in reader.fieldnames]
+
+        for line_num, row in enumerate(reader, start=2):  # start=2 accounts for header row
+            if not row or all(v is None or not str(v).strip() for v in row.values()):
+                continue  # Skip trailing empty lines
+
+            ext_id = _clean_str(row.get("external_id"))
+            text = _clean_str(row.get("text"))
+
+            if not ext_id or not text:
+                bad_rows.append({
+                    "line": line_num,
+                    "error": "Missing required field 'external_id' or 'text'",
+                    "data": row,
+                })
                 continue
-            
-            metadata = {k: v for k, v in row.items() if k not in ("external_id", "text")}
+
+            if ext_id in seen_ids:
+                bad_rows.append({
+                    "line": line_num,
+                    "error": f"Duplicate external_id '{ext_id}' in file",
+                    "data": row,
+                })
+                continue
+
+            seen_ids.add(ext_id)
+            metadata = {
+                k: v for k, v in row.items()
+                if k not in ("external_id", "text") and k != ""
+            }
+
             valid_rows.append({
-                "external_id": str(row["external_id"]),
-                "text": str(row["text"]),
-                "metadata": metadata
+                "external_id": ext_id,
+                "text": text,
+                "metadata": metadata,
             })
-            
-    elif file.filename.endswith(".json") or file.filename.endswith(".jsonl"):
-        try:
-            data = json.loads(text_content)
-            if not isinstance(data, list):
-                data = [json.loads(line) for line in lines if line.strip()]
-        except json.JSONDecodeError:
-            data = []
-            for i, line in enumerate(lines, start=1):
-                line = line.strip()
-                if not line:
+
+    elif filename.endswith((".json", ".jsonl")):
+        # Check if entire content is a JSON array
+        is_json_array = False
+        parsed_items: list[tuple[int, Any]] = []
+
+        stripped = text_content.strip()
+        if stripped.startswith("["):
+            try:
+                data = json.loads(stripped)
+                if isinstance(data, list):
+                    is_json_array = True
+                    parsed_items = list(enumerate(data, start=1))
+            except json.JSONDecodeError:
+                pass
+
+        if not is_json_array:
+            # Parse as JSON Lines (one JSON object per line)
+            for line_num, line in enumerate(text_content.splitlines(), start=1):
+                clean_line = line.strip()
+                if not clean_line:
                     continue
                 try:
-                    data.append(json.loads(line))
+                    obj = json.loads(clean_line)
+                    parsed_items.append((line_num, obj))
                 except json.JSONDecodeError:
-                    bad_rows.append({"line": i, "error": "Invalid JSON", "data": line})
-                    
-        for i, item in enumerate(data, start=1):
+                    bad_rows.append({
+                        "line": line_num,
+                        "error": "Invalid JSON syntax",
+                        "data": clean_line[:120],
+                    })
+
+        for line_num, item in parsed_items:
             if not isinstance(item, dict):
-                bad_rows.append({"line": i, "error": "Row is not an object", "data": item})
+                bad_rows.append({
+                    "line": line_num,
+                    "error": "Row must be a JSON object",
+                    "data": str(item)[:120],
+                })
                 continue
-            if not item.get("external_id") or not item.get("text"):
-                bad_rows.append({"line": i, "error": "Missing external_id or text", "data": item})
+
+            ext_id = _clean_str(item.get("external_id"))
+            text = _clean_str(item.get("text"))
+
+            if not ext_id or not text:
+                bad_rows.append({
+                    "line": line_num,
+                    "error": "Missing required field 'external_id' or 'text'",
+                    "data": item,
+                })
                 continue
-                
-            metadata = item.get("metadata", {})
-            if not metadata:
-                metadata = {k: v for k, v in item.items() if k not in ("external_id", "text", "metadata")}
-                
+
+            if ext_id in seen_ids:
+                bad_rows.append({
+                    "line": line_num,
+                    "error": f"Duplicate external_id '{ext_id}' in file",
+                    "data": item,
+                })
+                continue
+
+            seen_ids.add(ext_id)
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {
+                    k: v for k, v in item.items()
+                    if k not in ("external_id", "text", "metadata")
+                }
+
             valid_rows.append({
-                "external_id": str(item["external_id"]),
-                "text": str(item["text"]),
-                "metadata": metadata
+                "external_id": ext_id,
+                "text": text,
+                "metadata": metadata,
             })
-    else:
-        bad_rows.append({"line": 0, "error": "Unsupported file format. Use .csv or .json", "data": None})
 
     return valid_rows, bad_rows

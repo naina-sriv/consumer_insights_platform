@@ -22,3 +22,12 @@ This log records major design and implementation choices, tradeoffs, and rationa
 ### ADR 004: Embedding Dimension and Model
 - **Decision**: Fix embedding dimension to 1536 dims (`text-embedding-3-small`).
 - **Why**: Provides high-performance semantic retrieval at very low cost per 1k tokens, natively supported in `pgvector` with HNSW indexing.
+
+### ADR 005: Backend-Agnostic GUID & Vector Types for Fast, Isolated Testing
+- **Decision**: Define custom SQLAlchemy `GUID` and `UniversalVector` `TypeDecorator` implementations.
+- **Why**: In production, they bind directly to native PostgreSQL `UUID` and `pgvector.Vector`. In developer and CI test suites without active Docker containers, they seamlessly bind to SQLite `CHAR(36)` and `TEXT`, allowing ultra-fast in-memory test execution without network dependencies.
+- **Tradeoff**: Minimal boilerplate in `domain.py`, vastly improved developer velocity and test reliability.
+
+### ADR 006: Keyset Pagination for Background Worker Batch Processing
+- **Decision**: Process records during job execution via keyset pagination (`WHERE id > :last_id ORDER BY id LIMIT :batch_size`) rather than `OFFSET`.
+- **Why**: `OFFSET` pagination exhibits $O(N^2)$ scan complexity as dataset size grows to 20,000+ records. Keyset pagination operates in strict $O(N)$ index-seek time and eliminates duplicate/missed row hazards during ongoing writes.
